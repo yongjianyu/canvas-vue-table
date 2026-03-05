@@ -1,0 +1,48 @@
+{
+  "name": "canvas-vue-table",
+  "version": "0.0.1",
+  "description": "基于 Canvas 的高性能 Vue 3 虚拟列表组件库",
+  "type": "module",
+  "main": "./dist/canvas-vue-table.umd.cjs",
+  "module": "./dist/canvas-vue-table.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/canvas-vue-table.js",
+      "require": "./dist/canvas-vue-table.umd.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "vue",
+    "vue3",
+    "canvas",
+    "virtual-list",
+    "virtual-scroll",
+    "table"
+  ],
+  "author": "",
+  "license": "MIT",
+  "peerDependencies": {
+    "vue": "^3.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@vitejs/plugin-vue": "^5.0.0",
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0",
+    "vite-plugin-dts": "^3.6.0",
+    "vitepress": "^1.6.4",
+    "vue": "^3.4.0"
+  },
+  "scripts": {
+    "dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
+    "build": "vite build",
+    "preview": "vite preview"
+  }
+}
