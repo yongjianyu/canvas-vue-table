@@ -1,8 +1,14 @@
 /**
  * 虚拟列表类型定义
  */
+export interface Column {
+  field: string //字段路径，根据路径从数据源中获取数据
+  title: string //列标题
+  width: number //列宽度
+}
 
 export interface VirtualListProps {
+  columns: Column[]
   /** 数据源 */
   items: unknown[]
   /** 每项高度 */
@@ -10,7 +16,8 @@ export interface VirtualListProps {
   /** 容器高度 */
   height?: number
   /** 缓冲区大小（可视区域外预渲染的项目数） */
-  bufferSize?: number
+  bufferSize?: number,
+  
 }
 
 export interface VirtualListEmits {
