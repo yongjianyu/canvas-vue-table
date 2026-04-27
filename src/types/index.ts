@@ -11,13 +11,12 @@ export interface VirtualListProps {
   columns: Column[]
   /** 数据源 */
   items: unknown[]
-  /** 每项高度 */
-  itemHeight: number
+  /** 最小行高 */
+  minItemHeight?: number
   /** 容器高度 */
   height?: number
   /** 缓冲区大小（可视区域外预渲染的项目数） */
-  bufferSize?: number,
-  
+  bufferSize?: number
 }
 
 export interface VirtualListEmits {
