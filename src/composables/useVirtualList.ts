@@ -1,8 +1,8 @@
-import { ref, computed, unref } from 'vue'
+import { ref, computed, unref, watch } from 'vue'
 import type { Ref } from 'vue'
 
 export interface UseVirtualListOptions {
-  itemHeights: Ref<number[]>
+  estimatedHeight: number
   containerHeight: number | Ref<number>
   bufferSize?: number
 }
@@ -11,34 +11,90 @@ export function useVirtualList<T>(
   items: Ref<T[]>,
   options: UseVirtualListOptions
 ) {
-  const { itemHeights, containerHeight: containerHeightOption, bufferSize = 3 } = options
+  const {
+    estimatedHeight,
+    containerHeight: containerHeightOption,
+    bufferSize = 3,
+  } = options
   const scrollTop = ref(0)
 
-  const prefixSums = computed(() => {
-    const heights = itemHeights.value
-    const sums = new Array(heights.length + 1)
-    sums[0] = 0
-    for (let i = 0; i < heights.length; i++) {
-      sums[i + 1] = sums[i] + heights[i]
+  let heightCache: number[] = []
+  let sumsCache: number[] = [0]
+  let sumsDirtyFrom = 0
+
+  function ensureCache(len: number) {
+    if (heightCache.length < len) {
+      const old = heightCache.length
+      heightCache.length = len
+      heightCache.fill(estimatedHeight, old, len)
+      sumsDirtyFrom = Math.min(sumsDirtyFrom, old)
+    } else if (heightCache.length > len) {
+      heightCache.length = len
+      sumsDirtyFrom = Math.min(sumsDirtyFrom, len)
     }
-    return sums
-  })
+  }
+
+  function rebuildSums() {
+    const len = heightCache.length
+    if (sumsCache.length !== len + 1) {
+      sumsCache = new Array(len + 1)
+      sumsCache[0] = 0
+      sumsDirtyFrom = 0
+    }
+    const start = Math.max(0, sumsDirtyFrom)
+    for (let i = start; i < len; i++) {
+      sumsCache[i + 1] = sumsCache[i] + heightCache[i]
+    }
+    sumsDirtyFrom = len
+  }
+
+  function setHeight(index: number, height: number) {
+    if (index < 0 || index >= heightCache.length) return
+    if (heightCache[index] === height) return
+    heightCache[index] = height
+    if (index < sumsDirtyFrom) sumsDirtyFrom = index
+  }
+
+  const version = ref(0)
+
+  function invalidate() {
+    version.value++
+  }
+
+  watch(
+    () => items.value.length,
+    (len) => {
+      ensureCache(len)
+      rebuildSums()
+      invalidate()
+    },
+    { immediate: true }
+  )
 
   const totalHeight = computed(() => {
-    const sums = prefixSums.value
-    return sums[sums.length - 1] ?? 0
+    version.value
+    rebuildSums()
+    return sumsCache[heightCache.length] ?? 0
+  })
+
+  const prefixSums = computed(() => {
+    version.value
+    rebuildSums()
+    return sumsCache
   })
 
   const range = computed(() => {
+    version.value
     const containerHeight = unref(containerHeightOption)
     const scroll = scrollTop.value
     const total = items.value.length
-    const sums = prefixSums.value
+    rebuildSums()
+    const sums = sumsCache
 
-    let startIndex = binarySearch(sums, scroll)
+    let startIndex = binarySearch(sums, scroll, total)
     startIndex = Math.max(0, startIndex - bufferSize)
 
-    let endIndex = binarySearch(sums, scroll + containerHeight)
+    let endIndex = binarySearch(sums, scroll + containerHeight, total)
     endIndex = Math.min(total, endIndex + bufferSize)
 
     return {
@@ -51,7 +107,10 @@ export function useVirtualList<T>(
 
   const setScrollTop = (value: number) => {
     const containerHeight = unref(containerHeightOption)
-    scrollTop.value = Math.max(0, Math.min(value, totalHeight.value - containerHeight))
+    scrollTop.value = Math.max(
+      0,
+      Math.min(value, totalHeight.value - containerHeight)
+    )
   }
 
   return {
@@ -60,12 +119,19 @@ export function useVirtualList<T>(
     prefixSums,
     range,
     setScrollTop,
+    setHeight,
+    invalidate,
+    getHeight: (index: number) => heightCache[index] ?? estimatedHeight,
   }
 }
 
-function binarySearch(sums: number[], target: number): number {
+function binarySearch(
+  sums: number[],
+  target: number,
+  maxIndex: number
+): number {
   let lo = 0
-  let hi = sums.length - 2
+  let hi = maxIndex - 1
   while (lo <= hi) {
     const mid = (lo + hi) >> 1
     if (sums[mid + 1] <= target) {
