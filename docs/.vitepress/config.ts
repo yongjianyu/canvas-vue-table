@@ -10,9 +10,19 @@ export default defineConfig({
       { text: '示例', link: '/examples/' },
     ],
     sidebar: [
-      { text: '介绍', link: '/guide/' },
-      { text: '快速开始', link: '/guide/getting-started' },
-      { text: '示例', link: '/examples/' },
+      {
+        text: '指南',
+        items: [
+          { text: '介绍', link: '/guide/' },
+          { text: '快速开始', link: '/guide/getting-started' },
+        ],
+      },
+      {
+        text: '示例',
+        items: [
+          { text: '全部示例', link: '/examples/' },
+        ],
+      },
     ],
   },
   vite: {

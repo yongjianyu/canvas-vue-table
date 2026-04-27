@@ -6,6 +6,7 @@
     @scroll="onScroll"
     @mousemove="onMouseMove"
     @mouseleave="onMouseLeave"
+    @click="onClick"
   >
     <div
       class="canvas-virtual-list__spacer"
@@ -15,25 +16,58 @@
         v-show="hasColumns"
         ref="headerCanvasRef"
         class="canvas-virtual-list__header"
-        :width="width * dpr"
+        :width="canvasWidth * dpr"
         :height="effectiveHeaderHeight * dpr"
-        :style="{ width: `${width}px`, height: `${effectiveHeaderHeight}px` }"
+        :style="{
+          width: `${canvasWidth}px`,
+          height: `${effectiveHeaderHeight}px`
+        }"
       />
       <canvas
         ref="canvasRef"
         class="canvas-virtual-list__canvas"
-        :width="width * dpr"
+        :width="canvasWidth * dpr"
         :height="bodyHeight * dpr"
-        :style="{ top: `${effectiveHeaderHeight}px`, width: `${width}px`, height: `${bodyHeight}px` }"
+        :style="{
+          top: `${effectiveHeaderHeight}px`,
+          width: `${canvasWidth}px`,
+          height: `${bodyHeight}px`
+        }"
       />
+      <div
+        class="canvas-virtual-list__overlay"
+        :style="{
+          top: `${effectiveHeaderHeight}px`,
+          height: `${bodyHeight}px`
+        }"
+      >
+        <template
+          v-for="overlay in htmlCells"
+          :key="overlay.key"
+        >
+          <div
+            class="canvas-virtual-list__cell"
+            :style="overlay.style"
+          >
+            <component :is="overlay.vnode" />
+          </div>
+        </template>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watchEffect, onMounted, onUnmounted, nextTick } from 'vue'
+import {
+  ref,
+  computed,
+  watchEffect,
+  onMounted,
+  onUnmounted,
+  nextTick,
+} from 'vue'
 import { useVirtualList } from '../composables/useVirtualList'
-import type { Column } from '../types'
+import type { Column, CellRenderParams } from '../types'
 
 const HEADER_HEIGHT = 40
 const FONT = '14px system-ui, sans-serif'
@@ -59,10 +93,20 @@ const props = withDefaults(defineProps<Props>(), {
   bufferSize: 3,
 })
 
+const emit = defineEmits<{
+  scroll: [offset: number]
+  'row-click': [item: unknown, index: number]
+  'cell-click': [
+    item: unknown,
+    index: number,
+    column: Column,
+  ]
+}>()
+
 const containerRef = ref<HTMLDivElement | null>(null)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const headerCanvasRef = ref<HTMLCanvasElement | null>(null)
-const width = ref(0)
+const containerWidth = ref(0)
 const hoveredIndex = ref(-1)
 const dpr = ref(window.devicePixelRatio || 1)
 
@@ -74,16 +118,37 @@ const bodyHeight = computed(() =>
   Math.max(0, props.height - effectiveHeaderHeight.value)
 )
 
+const totalColumnsWidth = computed(() =>
+  props.columns.reduce((s, c) => s + c.width, 0)
+)
+const canvasWidth = computed(() =>
+  Math.max(containerWidth.value, totalColumnsWidth.value)
+)
+
 const columnWidths = computed(() => {
   const cols = props.columns
   if (cols.length === 0) return []
-  const totalDefined = cols.reduce((s, c) => s + c.width, 0)
-  const canvasW = width.value || 1
+  const totalDefined = totalColumnsWidth.value
+  const w = canvasWidth.value || 1
   if (totalDefined <= 0) {
-    return cols.map(() => canvasW / cols.length)
+    return cols.map(() => w / cols.length)
   }
-  const scale = canvasW / totalDefined
-  return cols.map((c) => c.width * scale)
+  if (totalDefined <= containerWidth.value) {
+    const scale = w / totalDefined
+    return cols.map((c) => c.width * scale)
+  }
+  return cols.map((c) => c.width)
+})
+
+const columnLefts = computed(() => {
+  const widths = columnWidths.value
+  const lefts: number[] = []
+  let x = 0
+  for (const w of widths) {
+    lefts.push(x)
+    x += w
+  }
+  return lefts
 })
 
 let measureCtx: CanvasRenderingContext2D | null = null
@@ -96,14 +161,20 @@ function getMeasureCtx(): CanvasRenderingContext2D {
   return measureCtx
 }
 
-function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+function wrapText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number
+): string[] {
   if (maxWidth <= 0) return ['']
-  const words = text.split('')
   const lines: string[] = []
   let current = ''
-  for (const ch of words) {
+  for (const ch of text) {
     const test = current + ch
-    if (ctx.measureText(test).width > maxWidth && current.length > 0) {
+    if (
+      ctx.measureText(test).width > maxWidth &&
+      current.length > 0
+    ) {
       lines.push(current)
       current = ch
     } else {
@@ -114,85 +185,210 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
   return lines.length > 0 ? lines : ['']
 }
 
-function getCellValue(item: unknown, field: string): string {
+function getCellValue(item: unknown, field: string): unknown {
   if (item == null) return ''
   if (typeof item === 'object' && field in item) {
-    const v = (item as Record<string, unknown>)[field]
-    return v != null ? String(v) : ''
+    return (item as Record<string, unknown>)[field]
   }
-  if (typeof item === 'string' || typeof item === 'number') return String(item)
+  if (typeof item === 'string' || typeof item === 'number')
+    return item
   return ''
 }
 
 function getItemText(item: unknown): string {
   if (item == null) return ''
-  if (typeof item === 'string' || typeof item === 'number') return String(item)
-  if (typeof item === 'object' && 'name' in item) return String((item as { name?: unknown }).name)
-  if (typeof item === 'object' && 'label' in item) return String((item as { label?: unknown }).label)
+  if (typeof item === 'string' || typeof item === 'number')
+    return String(item)
+  if (typeof item === 'object' && 'name' in item)
+    return String((item as { name?: unknown }).name)
+  if (typeof item === 'object' && 'label' in item)
+    return String((item as { label?: unknown }).label)
   return String(item)
 }
 
-function measureRowHeight(item: unknown, cols: Column[], widths: number[]): number {
+function measureRowHeight(
+  item: unknown,
+  cols: Column[],
+  widths: number[]
+): number {
   const ctx = getMeasureCtx()
   let maxLines = 1
   if (cols.length > 0) {
     cols.forEach((col, j) => {
+      if (col.type === 'html') return
       const w = widths[j] ?? 0
-      const text = getCellValue(item, col.field)
+      const text = String(getCellValue(item, col.field) ?? '')
       const lines = wrapText(ctx, text, w - CELL_PADDING_X * 2)
       if (lines.length > maxLines) maxLines = lines.length
     })
   } else {
     const text = getItemText(item)
-    const lines = wrapText(ctx, text, (width.value || 300) - CELL_PADDING_X * 2)
+    const lines = wrapText(
+      ctx,
+      text,
+      (containerWidth.value || 300) - CELL_PADDING_X * 2
+    )
     if (lines.length > maxLines) maxLines = lines.length
   }
-  return Math.max(props.minItemHeight, maxLines * LINE_HEIGHT + CELL_PADDING_Y * 2)
+  return Math.max(
+    props.minItemHeight,
+    maxLines * LINE_HEIGHT + CELL_PADDING_Y * 2
+  )
 }
 
 const itemHeights = computed(() => {
   const cols = props.columns
   const widths = columnWidths.value
-  width.value
-  return props.items.map((item) => measureRowHeight(item, cols, widths))
+  containerWidth.value
+  return props.items.map((item) =>
+    measureRowHeight(item, cols, widths)
+  )
 })
 
 const itemsRef = computed(() => props.items)
-const { totalHeight, prefixSums, range, setScrollTop } = useVirtualList(itemsRef, {
+const {
+  totalHeight,
+  prefixSums,
+  range,
+  setScrollTop,
+} = useVirtualList(itemsRef, {
   itemHeights,
   containerHeight: bodyHeight,
   bufferSize: props.bufferSize,
 })
 
+const htmlColumns = computed(() =>
+  props.columns
+    .map((col, i) => ({ col, colIndex: i }))
+    .filter(({ col }) => col.type === 'html' && col.render)
+)
+
+const htmlCells = computed(() => {
+  const { visibleItems, offsetY, startIndex } = range.value
+  const sums = prefixSums.value
+  const widths = columnWidths.value
+  const lefts = columnLefts.value
+  const cols = htmlColumns.value
+  if (cols.length === 0) return []
+
+  const cells: {
+    key: string
+    style: Record<string, string>
+    vnode: ReturnType<NonNullable<Column['render']>>
+  }[] = []
+
+  visibleItems.forEach((item, i) => {
+    const index = startIndex + i
+    const rowTop = sums[index] - offsetY
+    const rowH = sums[index + 1] - sums[index]
+
+    cols.forEach(({ col, colIndex }) => {
+      const value = getCellValue(item, col.field)
+      const params: CellRenderParams = {
+        item,
+        index,
+        column: col,
+        value,
+      }
+      cells.push({
+        key: `${index}-${colIndex}`,
+        style: {
+          position: 'absolute',
+          top: `${rowTop}px`,
+          left: `${lefts[colIndex]}px`,
+          width: `${widths[colIndex]}px`,
+          height: `${rowH}px`,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent:
+            col.align === 'center'
+              ? 'center'
+              : col.align === 'right'
+                ? 'flex-end'
+                : 'flex-start',
+          padding: `0 ${CELL_PADDING_X}px`,
+          boxSizing: 'border-box',
+        },
+        vnode: col.render!(params),
+      })
+    })
+  })
+
+  return cells
+})
+
 function onScroll() {
   const el = containerRef.value
-  if (el) setScrollTop(Math.max(0, el.scrollTop - effectiveHeaderHeight.value))
+  if (!el) return
+  const top = Math.max(
+    0,
+    el.scrollTop - effectiveHeaderHeight.value
+  )
+  setScrollTop(top)
+  emit('scroll', top)
 }
 
-function onMouseMove(e: MouseEvent) {
+function hitTest(e: MouseEvent) {
   const canvas = canvasRef.value
-  if (!canvas) return
+  if (!canvas) return null
   const rect = canvas.getBoundingClientRect()
+  const mouseX = e.clientX - rect.left
   const mouseY = e.clientY - rect.top
-  if (mouseY < 0 || mouseY >= rect.height) {
-    hoveredIndex.value = -1
-    return
-  }
+  if (mouseY < 0 || mouseY >= rect.height) return null
+
   const { offsetY, startIndex, endIndex } = range.value
   const sums = prefixSums.value
   const absY = mouseY + offsetY
-  let idx = -1
+
+  let rowIndex = -1
   for (let i = startIndex; i < endIndex; i++) {
     if (absY >= sums[i] && absY < sums[i + 1]) {
-      idx = i
+      rowIndex = i
       break
     }
   }
-  hoveredIndex.value = idx
+  if (rowIndex < 0) return null
+
+  let colIndex = -1
+  if (props.columns.length > 0) {
+    const lefts = columnLefts.value
+    const widths = columnWidths.value
+    for (let j = 0; j < lefts.length; j++) {
+      if (
+        mouseX >= lefts[j] &&
+        mouseX < lefts[j] + widths[j]
+      ) {
+        colIndex = j
+        break
+      }
+    }
+  }
+
+  return { rowIndex, colIndex }
+}
+
+function onMouseMove(e: MouseEvent) {
+  const hit = hitTest(e)
+  hoveredIndex.value = hit ? hit.rowIndex : -1
 }
 
 function onMouseLeave() {
   hoveredIndex.value = -1
+}
+
+function onClick(e: MouseEvent) {
+  const hit = hitTest(e)
+  if (!hit) return
+  const item = props.items[hit.rowIndex]
+  emit('row-click', item, hit.rowIndex)
+  if (hit.colIndex >= 0) {
+    emit(
+      'cell-click',
+      item,
+      hit.rowIndex,
+      props.columns[hit.colIndex]
+    )
+  }
 }
 
 function renderHeader() {
@@ -205,29 +401,54 @@ function renderHeader() {
 
   const cols = props.columns
   const widths = columnWidths.value
+  const lefts = columnLefts.value
   const h = props.headerHeight
-  let x = 0
+  const w = canvasWidth.value
+
+  ctx.clearRect(0, 0, w, h)
 
   ctx.fillStyle = '#f5f5f5'
-  ctx.fillRect(0, 0, width.value, h)
+  ctx.fillRect(0, 0, w, h)
 
   ctx.strokeStyle = '#e0e0e0'
-  ctx.font = FONT
+  ctx.lineWidth = 1
+  ctx.font = `600 ${FONT}`
   ctx.textBaseline = 'middle'
   ctx.fillStyle = '#333'
 
   cols.forEach((col, i) => {
-    const w = widths[i] ?? 0
+    const colW = widths[i] ?? 0
+    const x = lefts[i] ?? 0
     ctx.beginPath()
     ctx.moveTo(x, 0)
     ctx.lineTo(x, h)
     ctx.stroke()
-    ctx.fillText(col.title, x + CELL_PADDING_X, h / 2, w - CELL_PADDING_X * 2)
-    x += w
+
+    const textMaxW = colW - CELL_PADDING_X * 2
+    const align = col.align ?? 'left'
+    let textX = x + CELL_PADDING_X
+    if (align === 'center') {
+      ctx.textAlign = 'center'
+      textX = x + colW / 2
+    } else if (align === 'right') {
+      ctx.textAlign = 'right'
+      textX = x + colW - CELL_PADDING_X
+    } else {
+      ctx.textAlign = 'left'
+    }
+    ctx.fillText(col.title, textX, h / 2, textMaxW)
   })
+
+  ctx.textAlign = 'left'
+  const lastX = (lefts.at(-1) ?? 0) + (widths.at(-1) ?? 0)
   ctx.beginPath()
-  ctx.moveTo(x, 0)
-  ctx.lineTo(x, h)
+  ctx.moveTo(lastX, 0)
+  ctx.lineTo(lastX, h)
+  ctx.stroke()
+
+  ctx.beginPath()
+  ctx.moveTo(0, h - 0.5)
+  ctx.lineTo(w, h - 0.5)
   ctx.stroke()
 }
 
@@ -237,17 +458,18 @@ function render() {
   if (!ctx || !canvas) return
 
   const ratio = dpr.value
-  const canvasW = width.value
-  const canvasH = bodyHeight.value
+  const cw = canvasWidth.value
+  const ch = bodyHeight.value
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
 
   const { visibleItems, offsetY, startIndex } = range.value
   const cols = props.columns
   const widths = columnWidths.value
+  const lefts = columnLefts.value
   const hasCols = cols.length > 0
   const sums = prefixSums.value
 
-  ctx.clearRect(0, 0, canvasW, canvasH)
+  ctx.clearRect(0, 0, cw, ch)
 
   visibleItems.forEach((item, i) => {
     const index = startIndex + i
@@ -260,40 +482,93 @@ function render() {
       : index % 2 === 0
         ? '#fff'
         : '#f8f9fa'
-    ctx.fillRect(0, rowTop, canvasW, rowH)
+    ctx.fillRect(0, rowTop, cw, rowH)
 
     ctx.fillStyle = '#333'
     ctx.font = FONT
     ctx.textBaseline = 'top'
 
     if (hasCols) {
-      let x = 0
       cols.forEach((col, j) => {
+        if (col.type === 'html') return
         const w = widths[j] ?? 0
-        const raw = getCellValue(item, col.field)
-        const lines = wrapText(ctx, raw, w - CELL_PADDING_X * 2)
+        const x = lefts[j] ?? 0
+        const raw = String(getCellValue(item, col.field) ?? '')
+        const textMaxW = w - CELL_PADDING_X * 2
+        const lines = wrapText(ctx, raw, textMaxW)
         const textBlockH = lines.length * LINE_HEIGHT
         const textTop = rowTop + (rowH - textBlockH) / 2
-        lines.forEach((line, li) => {
-          ctx.fillText(line, x + CELL_PADDING_X, textTop + li * LINE_HEIGHT)
-        })
-        x += w
+
+        const align = col.align ?? 'left'
+        if (align === 'center') {
+          ctx.textAlign = 'center'
+          lines.forEach((line, li) => {
+            ctx.fillText(
+              line,
+              x + w / 2,
+              textTop + li * LINE_HEIGHT,
+              textMaxW
+            )
+          })
+        } else if (align === 'right') {
+          ctx.textAlign = 'right'
+          lines.forEach((line, li) => {
+            ctx.fillText(
+              line,
+              x + w - CELL_PADDING_X,
+              textTop + li * LINE_HEIGHT,
+              textMaxW
+            )
+          })
+        } else {
+          ctx.textAlign = 'left'
+          lines.forEach((line, li) => {
+            ctx.fillText(
+              line,
+              x + CELL_PADDING_X,
+              textTop + li * LINE_HEIGHT,
+              textMaxW
+            )
+          })
+        }
+        ctx.textAlign = 'left'
       })
     } else {
       const text = getItemText(item)
-      const lines = wrapText(ctx, text, canvasW - CELL_PADDING_X * 2)
+      const lines = wrapText(ctx, text, cw - CELL_PADDING_X * 2)
       const textBlockH = lines.length * LINE_HEIGHT
       const textTop = rowTop + (rowH - textBlockH) / 2
       lines.forEach((line, li) => {
-        ctx.fillText(line, CELL_PADDING_X, textTop + li * LINE_HEIGHT)
+        ctx.fillText(
+          line,
+          CELL_PADDING_X,
+          textTop + li * LINE_HEIGHT
+        )
       })
     }
 
     ctx.strokeStyle = '#eee'
     ctx.beginPath()
     ctx.moveTo(0, rowTop + rowH)
-    ctx.lineTo(canvasW, rowTop + rowH)
+    ctx.lineTo(cw, rowTop + rowH)
     ctx.stroke()
+
+    if (hasCols) {
+      ctx.strokeStyle = '#eee'
+      cols.forEach((_col, j) => {
+        const x = lefts[j] ?? 0
+        ctx.beginPath()
+        ctx.moveTo(x, rowTop)
+        ctx.lineTo(x, rowTop + rowH)
+        ctx.stroke()
+      })
+      const lastX =
+        (lefts.at(-1) ?? 0) + (widths.at(-1) ?? 0)
+      ctx.beginPath()
+      ctx.moveTo(lastX, rowTop)
+      ctx.lineTo(lastX, rowTop + rowH)
+      ctx.stroke()
+    }
   })
 }
 
@@ -303,7 +578,7 @@ function measureWidth() {
   const container = containerRef.value
   if (container) {
     const w = container.clientWidth
-    if (w > 0) width.value = w
+    if (w > 0) containerWidth.value = w
   }
 }
 
@@ -321,7 +596,7 @@ onMounted(() => {
     })
     resizeObserver = new ResizeObserver((entries) => {
       const entry = entries[0]
-      if (entry) width.value = entry.contentRect.width
+      if (entry) containerWidth.value = entry.contentRect.width
     })
     resizeObserver.observe(container)
   }
@@ -333,7 +608,8 @@ onUnmounted(() => {
 
 watchEffect(() => {
   range.value
-  width.value
+  containerWidth.value
+  canvasWidth.value
   columnWidths.value
   hoveredIndex.value
   renderHeader()
@@ -351,7 +627,8 @@ watchEffect(() => {
 
 .canvas-virtual-list__spacer {
   position: relative;
-  width: 100%;
+  width: fit-content;
+  min-width: 100%;
 }
 
 .canvas-virtual-list__header {
@@ -359,12 +636,25 @@ watchEffect(() => {
   top: 0;
   left: 0;
   display: block;
-  z-index: 1;
+  z-index: 2;
 }
 
 .canvas-virtual-list__canvas {
   position: sticky;
   left: 0;
   display: block;
+}
+
+.canvas-virtual-list__overlay {
+  position: sticky;
+  left: 0;
+  width: 100%;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.canvas-virtual-list__cell {
+  pointer-events: auto;
 }
 </style>
