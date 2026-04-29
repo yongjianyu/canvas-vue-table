@@ -11,51 +11,115 @@
     @mousemove="onMouseMove"
     @mouseleave="onMouseLeave"
     @click="onClick"
+    @contextmenu="onContextMenu"
   >
     <div
       class="cvt__spacer"
-      :style="{ height: `${effectiveHeaderHeight + totalHeight}px` }"
+      :style="{
+        height: `${effectiveHeaderHeight + totalHeight}px`,
+        width: spacerWidth,
+      }"
     >
       <canvas
         v-show="hasColumns"
         ref="headerCanvasRef"
         class="cvt__header"
-        :width="canvasWidth * dpr"
+        :width="containerWidth * dpr"
         :height="effectiveHeaderHeight * dpr"
         :style="{
-          width: `${canvasWidth}px`,
-          height: `${effectiveHeaderHeight}px`
+          width: `${containerWidth}px`,
+          height: `${effectiveHeaderHeight}px`,
         }"
+        @click.stop="onHeaderClick"
+        @mousemove="onHeaderMouseMove"
+        @mousedown="onHeaderMouseDown"
       />
+      <!-- Header HTML overlay -->
+      <div
+        v-if="headerHtmlCells.length"
+        class="cvt__header-overlay"
+        :style="{
+          width: `${containerWidth}px`,
+          height: `${effectiveHeaderHeight}px`,
+          marginTop: `-${effectiveHeaderHeight}px`,
+        }"
+      >
+        <template
+          v-for="cell in headerHtmlCells"
+          :key="cell.key"
+        >
+          <div class="cvt__header-cell" :style="cell.style">
+            <component :is="cell.vnode" />
+          </div>
+        </template>
+      </div>
       <div
         class="cvt__body"
         :style="{
           top: `${effectiveHeaderHeight}px`,
           height: `${bodyHeight}px`,
+          width: `${containerWidth}px`,
         }"
       >
         <canvas
           ref="canvasRef"
           class="cvt__canvas"
-          :width="canvasWidth * dpr"
+          :width="containerWidth * dpr"
           :height="bodyHeight * dpr"
           :style="{
-            width: `${canvasWidth}px`,
-            height: `${bodyHeight}px`
+            width: `${containerWidth}px`,
+            height: `${bodyHeight}px`,
           }"
         />
+        <!-- Left-fixed HTML overlay -->
         <div
+          v-if="htmlCellsLeft.length"
           class="cvt__overlay"
-          :style="{ height: `${bodyHeight}px` }"
+          :style="{ height: `${bodyHeight}px`, width: `${fixedLeftWidth}px` }"
         >
           <template
-            v-for="overlay in htmlCells"
+            v-for="overlay in htmlCellsLeft"
             :key="overlay.key"
           >
-            <div
-              class="cvt__cell"
-              :style="overlay.style"
-            >
+            <div class="cvt__cell" :style="overlay.style">
+              <component :is="overlay.vnode" />
+            </div>
+          </template>
+        </div>
+        <!-- Scrollable HTML overlay -->
+        <div
+          v-if="htmlCellsScrollable.length"
+          class="cvt__overlay cvt__overlay--scrollable"
+          :style="{
+            height: `${bodyHeight}px`,
+            left: `${fixedLeftWidth}px`,
+            width: `${containerWidth - fixedLeftWidth - fixedRightWidth}px`,
+          }"
+        >
+          <template
+            v-for="overlay in htmlCellsScrollable"
+            :key="overlay.key"
+          >
+            <div class="cvt__cell" :style="overlay.style">
+              <component :is="overlay.vnode" />
+            </div>
+          </template>
+        </div>
+        <!-- Right-fixed HTML overlay -->
+        <div
+          v-if="htmlCellsRight.length"
+          class="cvt__overlay"
+          :style="{
+            height: `${bodyHeight}px`,
+            left: `${containerWidth - fixedRightWidth}px`,
+            width: `${fixedRightWidth}px`,
+          }"
+        >
+          <template
+            v-for="overlay in htmlCellsRight"
+            :key="overlay.key"
+          >
+            <div class="cvt__cell" :style="overlay.style">
               <component :is="overlay.vnode" />
             </div>
           </template>
@@ -119,13 +183,24 @@ import {
 } from 'vue'
 import type { VNode } from 'vue'
 import { useVirtualList } from '../composables/useVirtualList'
-import type { Column, CellRenderParams, Theme } from '../types'
+import type {
+  Column,
+  CellRenderParams,
+  HeaderRenderParams,
+  Theme,
+  SortOrder,
+  SortState,
+  SelectionMode,
+  ContextMenuParams,
+} from '../types'
 
 const DEFAULT_HEADER_HEIGHT = 40
 const DEFAULT_LINE_HEIGHT = 23
 const CELL_PADDING_X = 12
 const CELL_PADDING_Y = 8
 const LOAD_MORE_THRESHOLD = 200
+const SORT_ARROW_WIDTH = 16
+const SHADOW_WIDTH = 6
 
 const defaultTheme: Required<Theme> = {
   headerBg: '#ffffff',
@@ -158,6 +233,13 @@ interface Props {
   bordered?: boolean
   loading?: boolean
   loadingText?: string
+  rowKey?: string
+  selectionMode?: SelectionMode
+  selectedKeys?: Array<string | number>
+  childrenField?: string
+  defaultExpandAll?: boolean
+  expandedKeys?: Array<string | number>
+  indent?: number
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -173,6 +255,13 @@ const props = withDefaults(defineProps<Props>(), {
   bordered: false,
   loading: false,
   loadingText: '加载中...',
+  rowKey: 'id',
+  selectionMode: 'none',
+  selectedKeys: () => [],
+  childrenField: '',
+  defaultExpandAll: false,
+  expandedKeys: undefined,
+  indent: 20,
 })
 
 const emit = defineEmits<{
@@ -184,6 +273,11 @@ const emit = defineEmits<{
     column: Column,
   ]
   'load-more': []
+  'sort-change': [sortState: SortState]
+  'selection-change': [selectedKeys: Array<string | number>]
+  'column-resize': [columnIndex: number, width: number]
+  'expand-change': [expandedKeys: Array<string | number>]
+  'context-menu': [params: ContextMenuParams]
 }>()
 
 const t = computed<Required<Theme>>(() => ({
@@ -196,11 +290,235 @@ const canvasRef = ref<HTMLCanvasElement | null>(null)
 const headerCanvasRef = ref<HTMLCanvasElement | null>(null)
 const containerWidth = ref(0)
 const hoveredIndex = ref(-1)
+const scrollLeft = ref(0)
 const dpr = ref(
   typeof window !== 'undefined'
     ? window.devicePixelRatio || 1
     : 1
 )
+
+// ========== Column Resize ==========
+
+const RESIZE_HANDLE_WIDTH = 8
+
+const internalColumnWidths = ref<Map<number, number>>(new Map())
+const resizeState = ref<{
+  colIndex: number
+  startX: number
+  startWidth: number
+} | null>(null)
+
+function getEffectiveColumnWidth(col: Column, index: number): number {
+  const override = internalColumnWidths.value.get(index)
+  if (override != null) return override
+  return col.width
+}
+
+// ========== Sorting ==========
+
+const sortState = ref<SortState>({ field: '', order: null })
+
+function getCellValue(item: unknown, field: string): unknown {
+  if (item == null) return ''
+  if (typeof item === 'object' && field in item) {
+    return (item as Record<string, unknown>)[field]
+  }
+  if (typeof item === 'string' || typeof item === 'number')
+    return item
+  return ''
+}
+
+const sortedItems = computed(() => {
+  const { field, order } = sortState.value
+  if (!field || !order) return props.items
+  const arr = [...props.items]
+  arr.sort((a, b) => {
+    const va = getCellValue(a, field)
+    const vb = getCellValue(b, field)
+    if (va == null && vb == null) return 0
+    if (va == null) return order === 'asc' ? -1 : 1
+    if (vb == null) return order === 'asc' ? 1 : -1
+    if (typeof va === 'number' && typeof vb === 'number') {
+      return order === 'asc' ? va - vb : vb - va
+    }
+    const sa = String(va)
+    const sb = String(vb)
+    const cmp = sa.localeCompare(sb)
+    return order === 'asc' ? cmp : -cmp
+  })
+  return arr
+})
+
+// ========== Tree Data ==========
+
+const EXPAND_ARROW_SIZE = 10
+
+const isTreeMode = computed(() => !!props.childrenField)
+
+const internalExpandedKeys = ref<Set<string | number>>(new Set())
+let treeInitialized = false
+
+const expandedKeySet = computed(() => {
+  if (props.expandedKeys) return new Set(props.expandedKeys)
+  return internalExpandedKeys.value
+})
+
+function getChildren(item: unknown): unknown[] {
+  if (!props.childrenField || item == null || typeof item !== 'object') return []
+  const children = (item as Record<string, unknown>)[props.childrenField]
+  return Array.isArray(children) ? children : []
+}
+
+function hasChildren(item: unknown): boolean {
+  return getChildren(item).length > 0
+}
+
+interface FlatNode {
+  item: unknown
+  depth: number
+  hasChildren: boolean
+}
+
+const flattenedData = computed<FlatNode[]>(() => {
+  if (!isTreeMode.value) {
+    return sortedItems.value.map((item) => ({
+      item,
+      depth: 0,
+      hasChildren: false,
+    }))
+  }
+
+  if (!treeInitialized && props.defaultExpandAll) {
+    const allKeys: (string | number)[] = []
+    const collectKeys = (items: unknown[]) => {
+      for (const item of items) {
+        if (hasChildren(item)) {
+          allKeys.push(getRowKey(item, -1))
+          collectKeys(getChildren(item))
+        }
+      }
+    }
+    collectKeys(sortedItems.value)
+    internalExpandedKeys.value = new Set(allKeys)
+    treeInitialized = true
+  }
+
+  const expSet = expandedKeySet.value
+  const result: FlatNode[] = []
+
+  const walk = (items: unknown[], depth: number) => {
+    for (const item of items) {
+      const hc = hasChildren(item)
+      result.push({ item, depth, hasChildren: hc })
+      if (hc && expSet.has(getRowKey(item, -1))) {
+        walk(getChildren(item), depth + 1)
+      }
+    }
+  }
+  walk(sortedItems.value, 0)
+  return result
+})
+
+const flatItems = computed(() => flattenedData.value.map((n) => n.item))
+
+function toggleExpand(item: unknown) {
+  const key = getRowKey(item, -1)
+  const next = new Set(expandedKeySet.value)
+  if (next.has(key)) {
+    next.delete(key)
+  } else {
+    next.add(key)
+  }
+  internalExpandedKeys.value = next
+  emit('expand-change', Array.from(next))
+  invalidate()
+}
+
+function getFlatNodeDepth(flatIndex: number): number {
+  return flattenedData.value[flatIndex]?.depth ?? 0
+}
+
+function getFlatNodeHasChildren(flatIndex: number): boolean {
+  return flattenedData.value[flatIndex]?.hasChildren ?? false
+}
+
+function isFlatNodeExpanded(flatIndex: number): boolean {
+  const node = flattenedData.value[flatIndex]
+  if (!node || !node.hasChildren) return false
+  return expandedKeySet.value.has(getRowKey(node.item, -1))
+}
+
+// ========== Selection ==========
+
+const internalSelectedKeys = ref<Set<string | number>>(new Set())
+
+const selectedKeySet = computed(() => {
+  if (props.selectedKeys && props.selectedKeys.length > 0) {
+    return new Set(props.selectedKeys)
+  }
+  return internalSelectedKeys.value
+})
+
+function getRowKey(item: unknown, index: number): string | number {
+  if (item != null && typeof item === 'object' && props.rowKey in item) {
+    return (item as Record<string, unknown>)[props.rowKey] as string | number
+  }
+  return index
+}
+
+function toggleSelection(item: unknown, index: number) {
+  if (props.selectionMode === 'none') return
+  const key = getRowKey(item, index)
+  const next = new Set(selectedKeySet.value)
+
+  if (props.selectionMode === 'single') {
+    if (next.has(key)) {
+      next.clear()
+    } else {
+      next.clear()
+      next.add(key)
+    }
+  } else {
+    if (next.has(key)) {
+      next.delete(key)
+    } else {
+      next.add(key)
+    }
+  }
+
+  internalSelectedKeys.value = next
+  emit('selection-change', Array.from(next))
+}
+
+function selectAll() {
+  if (props.selectionMode !== 'multiple') return
+  const allKeys = flatItems.value.map((item, i) => getRowKey(item, i))
+  const isAllSelected = allKeys.length > 0 && allKeys.every((k) => selectedKeySet.value.has(k))
+
+  let next: Set<string | number>
+  if (isAllSelected) {
+    next = new Set()
+  } else {
+    next = new Set(allKeys)
+  }
+  internalSelectedKeys.value = next
+  emit('selection-change', Array.from(next))
+}
+
+const isAllSelected = computed(() => {
+  const items = flatItems.value
+  if (items.length === 0) return false
+  return items.every((item, i) => selectedKeySet.value.has(getRowKey(item, i)))
+})
+
+const isIndeterminate = computed(() => {
+  const items = flatItems.value
+  if (items.length === 0) return false
+  const count = items.filter((item, i) => selectedKeySet.value.has(getRowKey(item, i))).length
+  return count > 0 && count < items.length
+})
+
+// ========== Layout ==========
 
 const bodyFont = computed(
   () => `${t.value.fontSize}px ${t.value.fontFamily}`
@@ -218,25 +536,30 @@ const bodyHeight = computed(() =>
 )
 
 const totalColumnsWidth = computed(() =>
-  props.columns.reduce((s, c) => s + c.width, 0)
+  props.columns.reduce((s, c, i) => s + getEffectiveColumnWidth(c, i), 0)
 )
-const canvasWidth = computed(() =>
-  Math.max(containerWidth.value, totalColumnsWidth.value)
+
+const spacerWidth = computed(() =>
+  totalColumnsWidth.value > containerWidth.value
+    ? `${totalColumnsWidth.value}px`
+    : '100%'
 )
+
+const hasResizedColumns = computed(() => internalColumnWidths.value.size > 0)
 
 const columnWidths = computed(() => {
   const cols = props.columns
   if (cols.length === 0) return []
   const totalDefined = totalColumnsWidth.value
-  const w = canvasWidth.value || 1
+  const w = containerWidth.value || 1
   if (totalDefined <= 0) {
     return cols.map(() => w / cols.length)
   }
-  if (totalDefined <= containerWidth.value) {
-    const scale = w / totalDefined
-    return cols.map((c) => c.width * scale)
+  if (hasResizedColumns.value || totalDefined > w) {
+    return cols.map((c, i) => getEffectiveColumnWidth(c, i))
   }
-  return cols.map((c) => c.width)
+  const scale = w / totalDefined
+  return cols.map((c, i) => getEffectiveColumnWidth(c, i) * scale)
 })
 
 const columnLefts = computed(() => {
@@ -249,6 +572,51 @@ const columnLefts = computed(() => {
   }
   return lefts
 })
+
+// ========== Fixed Column Groups ==========
+
+interface ColRef {
+  col: Column
+  index: number
+}
+
+const fixedLeftCols = computed<ColRef[]>(() =>
+  props.columns
+    .map((col, i) => ({ col, index: i }))
+    .filter(({ col }) => col.fixed === 'left')
+)
+
+const fixedRightCols = computed<ColRef[]>(() =>
+  props.columns
+    .map((col, i) => ({ col, index: i }))
+    .filter(({ col }) => col.fixed === 'right')
+)
+
+const scrollableCols = computed<ColRef[]>(() =>
+  props.columns
+    .map((col, i) => ({ col, index: i }))
+    .filter(({ col }) => !col.fixed)
+)
+
+const fixedLeftWidth = computed(() =>
+  fixedLeftCols.value.reduce(
+    (s, { index }) => s + (columnWidths.value[index] ?? 0),
+    0
+  )
+)
+
+const fixedRightWidth = computed(() =>
+  fixedRightCols.value.reduce(
+    (s, { index }) => s + (columnWidths.value[index] ?? 0),
+    0
+  )
+)
+
+const hasFixedCols = computed(
+  () => fixedLeftCols.value.length > 0 || fixedRightCols.value.length > 0
+)
+
+// ========== Text Helpers ==========
 
 let measureCtx: CanvasRenderingContext2D | null = null
 function getMeasureCtx(): CanvasRenderingContext2D {
@@ -282,16 +650,6 @@ function wrapText(
   }
   if (current) lines.push(current)
   return lines.length > 0 ? lines : ['']
-}
-
-function getCellValue(item: unknown, field: string): unknown {
-  if (item == null) return ''
-  if (typeof item === 'object' && field in item) {
-    return (item as Record<string, unknown>)[field]
-  }
-  if (typeof item === 'string' || typeof item === 'number')
-    return item
-  return ''
 }
 
 function getItemText(item: unknown): string {
@@ -335,7 +693,9 @@ function measureRowHeight(
   )
 }
 
-const itemsRef = computed(() => props.items)
+// ========== Virtual List ==========
+
+const itemsRef = computed(() => flatItems.value)
 const {
   totalHeight,
   prefixSums,
@@ -348,6 +708,10 @@ const {
   estimatedHeight: props.minItemHeight,
   containerHeight: bodyHeight,
   bufferSize: props.bufferSize,
+})
+
+watch(sortState, () => {
+  invalidate()
 })
 
 function measureVisibleRows() {
@@ -365,6 +729,8 @@ function measureVisibleRows() {
   })
   if (changed) invalidate()
 }
+
+// ========== HTML Overlay ==========
 
 const htmlColumns = computed(() =>
   props.columns
@@ -394,19 +760,30 @@ function resolveCellContent(
   return result
 }
 
-const htmlCells = computed(() => {
+interface OverlayCell {
+  key: string
+  style: Record<string, string>
+  vnode: VNode
+}
+
+function buildHtmlCells(
+  group: 'left' | 'scrollable' | 'right'
+): OverlayCell[] {
   const { visibleItems, offsetY, startIndex } = range.value
   const sums = prefixSums.value
   const widths = columnWidths.value
   const lefts = columnLefts.value
-  const cols = htmlColumns.value
+  const flw = fixedLeftWidth.value
+  const sl = scrollLeft.value
+
+  const cols = htmlColumns.value.filter(({ col }) => {
+    if (group === 'left') return col.fixed === 'left'
+    if (group === 'right') return col.fixed === 'right'
+    return !col.fixed
+  })
   if (cols.length === 0) return []
 
-  const cells: {
-    key: string
-    style: Record<string, string>
-    vnode: VNode
-  }[] = []
+  const cells: OverlayCell[] = []
 
   visibleItems.forEach((item, i) => {
     const index = startIndex + i
@@ -421,12 +798,24 @@ const htmlCells = computed(() => {
         column: col,
         value,
       }
+
+      let cellLeft: number
+      if (group === 'left') {
+        cellLeft = lefts[colIndex]
+      } else if (group === 'right') {
+        const rightGroupLefts = computeRightGroupLefts()
+        cellLeft =
+          rightGroupLefts.get(colIndex) ?? 0
+      } else {
+        cellLeft = lefts[colIndex] - sl - flw
+      }
+
       cells.push({
         key: `${index}-${colIndex}`,
         style: {
           position: 'absolute',
           top: `${rowTop}px`,
-          left: `${lefts[colIndex]}px`,
+          left: `${cellLeft}px`,
           width: `${widths[colIndex]}px`,
           height: `${rowH}px`,
           display: 'flex',
@@ -446,7 +835,110 @@ const htmlCells = computed(() => {
   })
 
   return cells
+}
+
+function computeRightGroupLefts(): Map<number, number> {
+  const result = new Map<number, number>()
+  const widths = columnWidths.value
+  let x = 0
+  for (const { index } of fixedRightCols.value) {
+    result.set(index, x)
+    x += widths[index] ?? 0
+  }
+  return result
+}
+
+const htmlCellsLeft = computed(() => buildHtmlCells('left'))
+const htmlCellsScrollable = computed(() =>
+  buildHtmlCells('scrollable')
+)
+const htmlCellsRight = computed(() => buildHtmlCells('right'))
+
+// ========== Header HTML Overlay ==========
+
+const htmlHeaderColumns = computed(() =>
+  props.columns
+    .map((col, i) => ({ col, colIndex: i }))
+    .filter(
+      ({ col }) =>
+        col.headerType === 'html' &&
+        (col.headerRender || col.headerComponent)
+    )
+)
+
+function resolveHeaderContent(
+  col: Column,
+  params: HeaderRenderParams
+): VNode {
+  if (col.headerComponent) {
+    const extra = col.headerComponentProps ?? {}
+    return h(col.headerComponent, { ...params, ...extra })
+  }
+  const result = col.headerRender!(params)
+  if (typeof result === 'string') {
+    return h('span', { innerHTML: result })
+  }
+  return result
+}
+
+const headerHtmlCells = computed<OverlayCell[]>(() => {
+  if (htmlHeaderColumns.value.length === 0) return []
+  const widths = columnWidths.value
+  const lefts = columnLefts.value
+  const hh = props.headerHeight
+  const sl = scrollLeft.value
+  const frw = fixedRightWidth.value
+  const cw = containerWidth.value
+
+  const cells: OverlayCell[] = []
+
+  for (const { col, colIndex } of htmlHeaderColumns.value) {
+    const params: HeaderRenderParams = {
+      column: col,
+      columnIndex: colIndex,
+    }
+
+    let cellLeft: number
+    if (col.fixed === 'left') {
+      cellLeft = lefts[colIndex]
+    } else if (col.fixed === 'right') {
+      let rx = cw - frw
+      for (const { index } of fixedRightCols.value) {
+        if (index === colIndex) { cellLeft = rx; break }
+        rx += widths[index]
+      }
+      cellLeft = cellLeft! ?? rx
+    } else {
+      cellLeft = lefts[colIndex] - sl
+    }
+
+    cells.push({
+      key: `hdr-${colIndex}`,
+      style: {
+        position: 'absolute',
+        top: '0',
+        left: `${cellLeft}px`,
+        width: `${widths[colIndex]}px`,
+        height: `${hh}px`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent:
+          col.align === 'center'
+            ? 'center'
+            : col.align === 'right'
+              ? 'flex-end'
+              : 'flex-start',
+        padding: `0 ${CELL_PADDING_X}px`,
+        boxSizing: 'border-box',
+      },
+      vnode: resolveHeaderContent(col, params),
+    })
+  }
+
+  return cells
 })
+
+// ========== Scroll & Events ==========
 
 let rafId = 0
 function scheduleRender() {
@@ -469,6 +961,7 @@ function onScroll() {
     el.scrollTop - effectiveHeaderHeight.value
   )
   setScrollTop(top)
+  scrollLeft.value = el.scrollLeft
   emit('scroll', top)
 
   const remaining =
@@ -483,6 +976,51 @@ function onScroll() {
   }
 
   scheduleRender()
+}
+
+// ========== Hit Testing ==========
+
+function hitTestColumn(mouseX: number): number {
+  const flw = fixedLeftWidth.value
+  const frw = fixedRightWidth.value
+  const cw = containerWidth.value
+  const widths = columnWidths.value
+  const lefts = columnLefts.value
+  const sl = scrollLeft.value
+
+  if (mouseX < flw) {
+    for (const { index } of fixedLeftCols.value) {
+      if (
+        mouseX >= lefts[index] &&
+        mouseX < lefts[index] + widths[index]
+      ) {
+        return index
+      }
+    }
+    return -1
+  }
+
+  if (mouseX > cw - frw && frw > 0) {
+    let rx = cw - frw
+    for (const { index } of fixedRightCols.value) {
+      if (mouseX >= rx && mouseX < rx + widths[index]) {
+        return index
+      }
+      rx += widths[index]
+    }
+    return -1
+  }
+
+  const absX = mouseX + sl
+  for (const { index } of scrollableCols.value) {
+    if (
+      absX >= lefts[index] &&
+      absX < lefts[index] + widths[index]
+    ) {
+      return index
+    }
+  }
+  return -1
 }
 
 function hitTest(e: MouseEvent) {
@@ -508,17 +1046,7 @@ function hitTest(e: MouseEvent) {
 
   let colIndex = -1
   if (props.columns.length > 0) {
-    const lefts = columnLefts.value
-    const widths = columnWidths.value
-    for (let j = 0; j < lefts.length; j++) {
-      if (
-        mouseX >= lefts[j] &&
-        mouseX < lefts[j] + widths[j]
-      ) {
-        colIndex = j
-        break
-      }
-    }
+    colIndex = hitTestColumn(mouseX)
   }
 
   return { rowIndex, colIndex }
@@ -548,7 +1076,29 @@ function onMouseLeave() {
 function onClick(e: MouseEvent) {
   const hit = hitTest(e)
   if (!hit) return
-  const item = props.items[hit.rowIndex]
+  const item = flatItems.value[hit.rowIndex]
+
+  if (isTreeMode.value && hit.colIndex === 0 && getFlatNodeHasChildren(hit.rowIndex)) {
+    const depth = getFlatNodeDepth(hit.rowIndex)
+    const canvas = canvasRef.value
+    if (canvas) {
+      const rect = canvas.getBoundingClientRect()
+      const mouseX = e.clientX - rect.left
+      const col0 = props.columns[0]
+      const col0X = col0.fixed === 'left'
+        ? columnLefts.value[0]
+        : columnLefts.value[0] - scrollLeft.value
+      const indentStart = col0X + CELL_PADDING_X + depth * props.indent
+      if (mouseX >= indentStart - 4 && mouseX <= indentStart + EXPAND_ARROW_SIZE + 4) {
+        toggleExpand(item)
+        return
+      }
+    }
+  }
+
+  if (props.selectionMode !== 'none') {
+    toggleSelection(item, hit.rowIndex)
+  }
   emit('row-click', item, hit.rowIndex)
   if (hit.colIndex >= 0) {
     emit(
@@ -560,6 +1110,308 @@ function onClick(e: MouseEvent) {
   }
 }
 
+function onContextMenu(e: MouseEvent) {
+  const hit = hitTest(e)
+  if (!hit) return
+  e.preventDefault()
+  const item = flatItems.value[hit.rowIndex]
+  emit('context-menu', {
+    item,
+    index: hit.rowIndex,
+    column: hit.colIndex >= 0 ? props.columns[hit.colIndex] : null,
+    columnIndex: hit.colIndex,
+    x: e.clientX,
+    y: e.clientY,
+  })
+}
+
+// ========== Sorting Events ==========
+
+function onHeaderClick(e: MouseEvent) {
+  const canvas = headerCanvasRef.value
+  if (!canvas) return
+  const rect = canvas.getBoundingClientRect()
+  const mouseX = e.clientX - rect.left
+  const colIndex = hitTestColumn(mouseX)
+  if (colIndex < 0) return
+
+  const col = props.columns[colIndex]
+  if (!col.sortable) return
+
+  const current = sortState.value
+  let nextOrder: SortOrder
+  if (current.field !== col.field) {
+    nextOrder = 'asc'
+  } else if (current.order === 'asc') {
+    nextOrder = 'desc'
+  } else {
+    nextOrder = null
+  }
+
+  sortState.value = {
+    field: nextOrder ? col.field : '',
+    order: nextOrder,
+  }
+  emit('sort-change', sortState.value)
+}
+
+function hitTestResizeHandle(mouseX: number): number {
+  const widths = columnWidths.value
+  const lefts = columnLefts.value
+  const sl = scrollLeft.value
+  const flw = fixedLeftWidth.value
+  const frw = fixedRightWidth.value
+  const cw = containerWidth.value
+
+  for (const { col, index } of fixedLeftCols.value) {
+    if (!col.resizable) continue
+    const right = lefts[index] + widths[index]
+    if (Math.abs(mouseX - right) <= RESIZE_HANDLE_WIDTH) return index
+  }
+
+  if (fixedRightCols.value.length > 0) {
+    let rx = cw - frw
+    for (const { col, index } of fixedRightCols.value) {
+      if (col.resizable) {
+        const right = rx + widths[index]
+        if (Math.abs(mouseX - right) <= RESIZE_HANDLE_WIDTH) return index
+      }
+      rx += widths[index]
+    }
+  }
+
+  for (const { col, index } of scrollableCols.value) {
+    if (!col.resizable) continue
+    const right = lefts[index] + widths[index] - sl
+    if (right >= flw - 1 && right <= cw - frw + 1) {
+      if (Math.abs(mouseX - right) <= RESIZE_HANDLE_WIDTH) return index
+    }
+  }
+
+  return -1
+}
+
+function onHeaderMouseMove(e: MouseEvent) {
+  if (resizeState.value) return
+  const canvas = headerCanvasRef.value
+  if (!canvas) return
+  const rect = canvas.getBoundingClientRect()
+  const mouseX = e.clientX - rect.left
+
+  const resizeCol = hitTestResizeHandle(mouseX)
+  if (resizeCol >= 0) {
+    canvas.style.cursor = 'col-resize'
+    return
+  }
+
+  const colIndex = hitTestColumn(mouseX)
+  if (colIndex >= 0 && props.columns[colIndex]?.sortable) {
+    canvas.style.cursor = 'pointer'
+  } else {
+    canvas.style.cursor = 'default'
+  }
+}
+
+function onHeaderMouseDown(e: MouseEvent) {
+  const canvas = headerCanvasRef.value
+  if (!canvas) return
+  const rect = canvas.getBoundingClientRect()
+  const mouseX = e.clientX - rect.left
+
+  const resizeCol = hitTestResizeHandle(mouseX)
+  if (resizeCol < 0) return
+
+  e.preventDefault()
+  e.stopPropagation()
+
+  if (internalColumnWidths.value.size === 0) {
+    const snapshot = new Map<number, number>()
+    const widths = columnWidths.value
+    for (let i = 0; i < props.columns.length; i++) {
+      snapshot.set(i, widths[i])
+    }
+    internalColumnWidths.value = snapshot
+  }
+
+  resizeState.value = {
+    colIndex: resizeCol,
+    startX: e.clientX,
+    startWidth: columnWidths.value[resizeCol],
+  }
+
+  document.addEventListener('mousemove', onResizeMove)
+  document.addEventListener('mouseup', onResizeEnd)
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+}
+
+function onResizeMove(e: MouseEvent) {
+  const state = resizeState.value
+  if (!state) return
+
+  const col = props.columns[state.colIndex]
+  const delta = e.clientX - state.startX
+  let newWidth = Math.max(30, state.startWidth + delta)
+
+  if (col.minWidth != null) newWidth = Math.max(col.minWidth, newWidth)
+  if (col.maxWidth != null) newWidth = Math.min(col.maxWidth, newWidth)
+
+  const next = new Map(internalColumnWidths.value)
+  next.set(state.colIndex, newWidth)
+  internalColumnWidths.value = next
+}
+
+function onResizeEnd() {
+  const state = resizeState.value
+  if (state) {
+    const finalWidth = columnWidths.value[state.colIndex]
+    emit('column-resize', state.colIndex, finalWidth)
+  }
+  resizeState.value = null
+  document.removeEventListener('mousemove', onResizeMove)
+  document.removeEventListener('mouseup', onResizeEnd)
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+}
+
+// ========== Canvas Rendering ==========
+
+function drawSortArrow(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  activeOrder: SortOrder,
+  theme: Required<Theme>
+) {
+  const aw = 5
+  const ah = 4
+  const gap = 1
+
+  ctx.save()
+  ctx.fillStyle =
+    activeOrder === 'asc' ? theme.accentColor : '#c0c4cc'
+  ctx.beginPath()
+  ctx.moveTo(cx, cy - gap - ah)
+  ctx.lineTo(cx - aw, cy - gap)
+  ctx.lineTo(cx + aw, cy - gap)
+  ctx.closePath()
+  ctx.fill()
+
+  ctx.fillStyle =
+    activeOrder === 'desc' ? theme.accentColor : '#c0c4cc'
+  ctx.beginPath()
+  ctx.moveTo(cx, cy + gap + ah)
+  ctx.lineTo(cx - aw, cy + gap)
+  ctx.lineTo(cx + aw, cy + gap)
+  ctx.closePath()
+  ctx.fill()
+  ctx.restore()
+}
+
+function drawFixedShadows(
+  ctx: CanvasRenderingContext2D,
+  h: number
+) {
+  const sl = scrollLeft.value
+  const flw = fixedLeftWidth.value
+  const frw = fixedRightWidth.value
+  const cw = containerWidth.value
+  const totalW = totalColumnsWidth.value
+
+  if (sl > 0 && flw > 0) {
+    const grad = ctx.createLinearGradient(
+      flw,
+      0,
+      flw + SHADOW_WIDTH,
+      0
+    )
+    grad.addColorStop(0, 'rgba(0,0,0,0.12)')
+    grad.addColorStop(1, 'rgba(0,0,0,0)')
+    ctx.fillStyle = grad
+    ctx.fillRect(flw, 0, SHADOW_WIDTH, h)
+  }
+
+  if (frw > 0 && sl + cw < totalW) {
+    const shadowX = cw - frw
+    const grad = ctx.createLinearGradient(
+      shadowX,
+      0,
+      shadowX - SHADOW_WIDTH,
+      0
+    )
+    grad.addColorStop(0, 'rgba(0,0,0,0.12)')
+    grad.addColorStop(1, 'rgba(0,0,0,0)')
+    ctx.fillStyle = grad
+    ctx.fillRect(shadowX - SHADOW_WIDTH, 0, SHADOW_WIDTH, h)
+  }
+}
+
+function drawHeaderCol(
+  ctx: CanvasRenderingContext2D,
+  col: Column,
+  colIndex: number,
+  x: number,
+  w: number,
+  hh: number,
+  theme: Required<Theme>
+) {
+  ctx.fillStyle = theme.headerBg
+  ctx.fillRect(x, 0, w, hh)
+
+  if (col.headerType !== 'html') {
+    const textMaxW =
+      w - CELL_PADDING_X * 2 - (col.sortable ? SORT_ARROW_WIDTH : 0)
+    const align = col.align ?? 'left'
+
+    ctx.fillStyle = theme.headerText
+    ctx.font = headerFont.value
+    ctx.textBaseline = 'middle'
+
+    let textX = x + CELL_PADDING_X
+    if (align === 'center') {
+      ctx.textAlign = 'center'
+      textX = x + w / 2 - (col.sortable ? SORT_ARROW_WIDTH / 2 : 0)
+    } else if (align === 'right') {
+      ctx.textAlign = 'right'
+      textX = x + w - CELL_PADDING_X - (col.sortable ? SORT_ARROW_WIDTH : 0)
+    } else {
+      ctx.textAlign = 'left'
+    }
+    ctx.fillText(col.title, textX, hh / 2, textMaxW)
+
+    if (col.sortable) {
+      const isActive = sortState.value.field === col.field
+      const activeOrder = isActive ? sortState.value.order : null
+      const arrowX = x + w - CELL_PADDING_X - 5
+      drawSortArrow(ctx, arrowX, hh / 2, activeOrder, theme)
+    }
+
+    ctx.textAlign = 'left'
+  }
+
+  if (col.resizable) {
+    ctx.strokeStyle = '#c0c4cc'
+    ctx.lineWidth = 1
+    const rx = x + w - 0.5
+    const cy = hh / 2
+    ctx.beginPath()
+    ctx.moveTo(rx, cy - 6)
+    ctx.lineTo(rx, cy + 6)
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(rx - 3, cy - 6)
+    ctx.lineTo(rx - 3, cy + 6)
+    ctx.stroke()
+  }
+
+  ctx.strokeStyle = theme.headerBorder
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(x, hh - 0.5)
+  ctx.lineTo(x + w, hh - 0.5)
+  ctx.stroke()
+}
+
 function renderHeader() {
   const canvas = headerCanvasRef.value
   const ctx = canvas?.getContext('2d')
@@ -569,60 +1421,246 @@ function renderHeader() {
   const ratio = dpr.value
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
 
-  const cols = props.columns
   const widths = columnWidths.value
   const lefts = columnLefts.value
   const hh = props.headerHeight
-  const w = canvasWidth.value
+  const cw = containerWidth.value
+  const sl = scrollLeft.value
+  const flw = fixedLeftWidth.value
+  const frw = fixedRightWidth.value
 
-  ctx.clearRect(0, 0, w, hh)
+  ctx.clearRect(0, 0, cw, hh)
 
   ctx.fillStyle = theme.headerBg
-  ctx.fillRect(0, 0, w, hh)
+  ctx.fillRect(0, 0, cw, hh)
 
-  ctx.font = headerFont.value
-  ctx.textBaseline = 'middle'
-
-  cols.forEach((col, i) => {
-    const colW = widths[i] ?? 0
-    const x = lefts[i] ?? 0
-    const textMaxW = colW - CELL_PADDING_X * 2
-    const align = col.align ?? 'left'
-
-    ctx.fillStyle = theme.headerText
-    let textX = x + CELL_PADDING_X
-    if (align === 'center') {
-      ctx.textAlign = 'center'
-      textX = x + colW / 2
-    } else if (align === 'right') {
-      ctx.textAlign = 'right'
-      textX = x + colW - CELL_PADDING_X
-    } else {
-      ctx.textAlign = 'left'
+  // 1. Scrollable columns (clipped)
+  const scrollableArea = cw - flw - frw
+  if (scrollableArea > 0 && scrollableCols.value.length > 0) {
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(flw, 0, scrollableArea, hh)
+    ctx.clip()
+    for (const { col, index } of scrollableCols.value) {
+      const x = lefts[index] - sl
+      const w = widths[index]
+      drawHeaderCol(ctx, col, index, x, w, hh, theme)
     }
-    ctx.fillText(col.title, textX, hh / 2, textMaxW)
-  })
+    ctx.restore()
+  }
 
-  ctx.textAlign = 'left'
+  // 2. Left-fixed columns
+  for (const { col, index } of fixedLeftCols.value) {
+    const x = lefts[index]
+    const w = widths[index]
+    drawHeaderCol(ctx, col, index, x, w, hh, theme)
+  }
 
-  ctx.strokeStyle = theme.headerBorder
-  ctx.lineWidth = 1
-  ctx.beginPath()
-  ctx.moveTo(0, hh - 0.5)
-  ctx.lineTo(w, hh - 0.5)
-  ctx.stroke()
+  // 3. Right-fixed columns
+  if (fixedRightCols.value.length > 0) {
+    let rx = cw - frw
+    for (const { col, index } of fixedRightCols.value) {
+      const w = widths[index]
+      drawHeaderCol(ctx, col, index, rx, w, hh, theme)
+      rx += w
+    }
+  }
 
+  // 4. Bordered vertical lines
   if (props.bordered) {
     ctx.strokeStyle = theme.border
-    cols.forEach((_col, i) => {
-      if (i === 0) return
-      const x = lefts[i] ?? 0
+    ctx.lineWidth = 1
+    // Left-fixed borders
+    for (const { index } of fixedLeftCols.value) {
+      if (index === 0) continue
+      const x = lefts[index]
       ctx.beginPath()
       ctx.moveTo(x + 0.5, 0)
       ctx.lineTo(x + 0.5, hh)
       ctx.stroke()
+    }
+    // Scrollable borders (clipped)
+    if (scrollableArea > 0) {
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(flw, 0, scrollableArea, hh)
+      ctx.clip()
+      for (const { index } of scrollableCols.value) {
+        const x = lefts[index] - sl
+        if (x <= flw) continue
+        ctx.beginPath()
+        ctx.moveTo(x + 0.5, 0)
+        ctx.lineTo(x + 0.5, hh)
+        ctx.stroke()
+      }
+      ctx.restore()
+    }
+    // Right-fixed borders
+    if (fixedRightCols.value.length > 0) {
+      let rx = cw - frw
+      for (let i = 0; i < fixedRightCols.value.length; i++) {
+        if (i > 0) {
+          ctx.beginPath()
+          ctx.moveTo(rx + 0.5, 0)
+          ctx.lineTo(rx + 0.5, hh)
+          ctx.stroke()
+        }
+        rx += widths[fixedRightCols.value[i].index]
+      }
+    }
+    // Fixed boundary lines
+    if (flw > 0) {
+      ctx.beginPath()
+      ctx.moveTo(flw + 0.5, 0)
+      ctx.lineTo(flw + 0.5, hh)
+      ctx.stroke()
+    }
+    if (frw > 0) {
+      const rx = cw - frw
+      ctx.beginPath()
+      ctx.moveTo(rx + 0.5, 0)
+      ctx.lineTo(rx + 0.5, hh)
+      ctx.stroke()
+    }
+  }
+
+  // 5. Shadows
+  if (hasFixedCols.value) {
+    drawFixedShadows(ctx, hh)
+  }
+
+  // 6. Resize handle highlight
+  if (resizeState.value) {
+    const ri = resizeState.value.colIndex
+    let rx = -1
+    if (props.columns[ri]?.fixed === 'left') {
+      rx = lefts[ri] + widths[ri]
+    } else if (props.columns[ri]?.fixed === 'right') {
+      let x = cw - frw
+      for (const { index } of fixedRightCols.value) {
+        if (index === ri) { rx = x + widths[index]; break }
+        x += widths[index]
+      }
+    } else {
+      rx = lefts[ri] + widths[ri] - sl
+    }
+    if (rx >= 0) {
+      ctx.strokeStyle = theme.accentColor
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.moveTo(rx, 0)
+      ctx.lineTo(rx, hh)
+      ctx.stroke()
+    }
+  }
+}
+
+function drawExpandArrow(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  expanded: boolean,
+  theme: Required<Theme>
+) {
+  ctx.save()
+  ctx.fillStyle = theme.cellText
+  ctx.beginPath()
+  if (expanded) {
+    ctx.moveTo(cx - 4, cy - 2)
+    ctx.lineTo(cx + 4, cy - 2)
+    ctx.lineTo(cx, cy + 3)
+  } else {
+    ctx.moveTo(cx - 2, cy - 4)
+    ctx.lineTo(cx + 3, cy)
+    ctx.lineTo(cx - 2, cy + 4)
+  }
+  ctx.closePath()
+  ctx.fill()
+  ctx.restore()
+}
+
+function drawCellText(
+  ctx: CanvasRenderingContext2D,
+  col: Column,
+  item: unknown,
+  x: number,
+  w: number,
+  rowTop: number,
+  rowH: number,
+  indentPx: number = 0
+) {
+  if (col.type === 'html') return
+  const raw = String(getCellValue(item, col.field) ?? '')
+  const effectivePadLeft = CELL_PADDING_X + indentPx
+  const textMaxW = w - effectivePadLeft - CELL_PADDING_X
+  if (textMaxW <= 0) return
+  const lines = wrapText(ctx, raw, textMaxW)
+  const textBlockH = lines.length * DEFAULT_LINE_HEIGHT
+  const textTop = rowTop + (rowH - textBlockH) / 2
+  const align = col.align ?? 'left'
+
+  if (align === 'center') {
+    ctx.textAlign = 'center'
+    lines.forEach((line, li) => {
+      ctx.fillText(
+        line,
+        x + effectivePadLeft + textMaxW / 2,
+        textTop + li * DEFAULT_LINE_HEIGHT,
+        textMaxW
+      )
+    })
+  } else if (align === 'right') {
+    ctx.textAlign = 'right'
+    lines.forEach((line, li) => {
+      ctx.fillText(
+        line,
+        x + w - CELL_PADDING_X,
+        textTop + li * DEFAULT_LINE_HEIGHT,
+        textMaxW
+      )
+    })
+  } else {
+    ctx.textAlign = 'left'
+    lines.forEach((line, li) => {
+      ctx.fillText(
+        line,
+        x + effectivePadLeft,
+        textTop + li * DEFAULT_LINE_HEIGHT,
+        textMaxW
+      )
     })
   }
+  ctx.textAlign = 'left'
+}
+
+function drawCellWithTree(
+  ctx: CanvasRenderingContext2D,
+  col: Column,
+  colIdx: number,
+  item: unknown,
+  flatIndex: number,
+  x: number,
+  w: number,
+  rowTop: number,
+  rowH: number,
+  theme: Required<Theme>
+) {
+  if (!isTreeMode.value || colIdx !== 0) {
+    drawCellText(ctx, col, item, x, w, rowTop, rowH)
+    return
+  }
+  const depth = getFlatNodeDepth(flatIndex)
+  const hc = getFlatNodeHasChildren(flatIndex)
+  const indentPx = depth * props.indent + (hc ? EXPAND_ARROW_SIZE + 6 : EXPAND_ARROW_SIZE + 6)
+
+  if (hc) {
+    const expanded = isFlatNodeExpanded(flatIndex)
+    const arrowX = x + CELL_PADDING_X + depth * props.indent + EXPAND_ARROW_SIZE / 2
+    const arrowY = rowTop + rowH / 2
+    drawExpandArrow(ctx, arrowX, arrowY, expanded, theme)
+  }
+
+  drawCellText(ctx, col, item, x, w, rowTop, rowH, indentPx)
 }
 
 function render() {
@@ -632,7 +1670,7 @@ function render() {
 
   const theme = t.value
   const ratio = dpr.value
-  const cw = canvasWidth.value
+  const cw = containerWidth.value
   const ch = bodyHeight.value
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
 
@@ -642,88 +1680,152 @@ function render() {
   const lefts = columnLefts.value
   const hasCols = cols.length > 0
   const sums = prefixSums.value
+  const sl = scrollLeft.value
+  const flw = fixedLeftWidth.value
+  const frw = fixedRightWidth.value
+  const scrollableArea = cw - flw - frw
 
   ctx.clearRect(0, 0, cw, ch)
 
   ctx.fillStyle = theme.rowBg
   ctx.fillRect(0, 0, cw, ch)
 
+  // 1. Row backgrounds (full width)
+  const selEnabled = props.selectionMode !== 'none'
+  const selSet = selectedKeySet.value
+
   visibleItems.forEach((item, i) => {
     const index = startIndex + i
     const rowTop = sums[index] - offsetY
     const rowH = sums[index + 1] - sums[index]
-
     const isHovered = index === hoveredIndex.value
+    const isSelected = selEnabled && selSet.has(getRowKey(item, index))
 
-    if (isHovered) {
+    if (isSelected) {
+      ctx.fillStyle = theme.rowActiveBg
+      ctx.fillRect(0, rowTop, cw, rowH)
+    } else if (isHovered) {
       ctx.fillStyle = theme.rowHoverBg
       ctx.fillRect(0, rowTop, cw, rowH)
     } else if (props.striped && index % 2 === 1) {
       ctx.fillStyle = theme.rowAltBg
       ctx.fillRect(0, rowTop, cw, rowH)
     }
+  })
 
-    ctx.fillStyle = theme.cellText
-    ctx.font = bodyFont.value
-    ctx.textBaseline = 'top'
+  ctx.fillStyle = theme.cellText
+  ctx.font = bodyFont.value
+  ctx.textBaseline = 'top'
 
-    if (hasCols) {
-      cols.forEach((col, j) => {
-        if (col.type === 'html') return
-        const w = widths[j] ?? 0
-        const x = lefts[j] ?? 0
-        const raw = String(
-          getCellValue(item, col.field) ?? ''
-        )
-        const textMaxW = w - CELL_PADDING_X * 2
-        const lines = wrapText(ctx, raw, textMaxW)
-        const textBlockH =
-          lines.length * DEFAULT_LINE_HEIGHT
-        const textTop = rowTop + (rowH - textBlockH) / 2
+  if (hasCols) {
+    // 2. Scrollable cells (clipped)
+    if (scrollableArea > 0 && scrollableCols.value.length > 0) {
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(flw, 0, scrollableArea, ch)
+      ctx.clip()
 
-        const align = col.align ?? 'left'
-        if (align === 'center') {
-          ctx.textAlign = 'center'
-          lines.forEach((line, li) => {
-            ctx.fillText(
-              line,
-              x + w / 2,
-              textTop + li * DEFAULT_LINE_HEIGHT,
-              textMaxW
-            )
-          })
-        } else if (align === 'right') {
-          ctx.textAlign = 'right'
-          lines.forEach((line, li) => {
-            ctx.fillText(
-              line,
-              x + w - CELL_PADDING_X,
-              textTop + li * DEFAULT_LINE_HEIGHT,
-              textMaxW
-            )
-          })
-        } else {
-          ctx.textAlign = 'left'
-          lines.forEach((line, li) => {
-            ctx.fillText(
-              line,
-              x + CELL_PADDING_X,
-              textTop + li * DEFAULT_LINE_HEIGHT,
-              textMaxW
-            )
-          })
+      visibleItems.forEach((item, i) => {
+        const index = startIndex + i
+        const rowTop = sums[index] - offsetY
+        const rowH = sums[index + 1] - sums[index]
+
+        ctx.fillStyle = theme.cellText
+        ctx.font = bodyFont.value
+        ctx.textBaseline = 'top'
+
+        for (const { col, index: colIdx } of scrollableCols.value) {
+          const w = widths[colIdx]
+          const x = lefts[colIdx] - sl
+          drawCellWithTree(ctx, col, colIdx, item, index, x, w, rowTop, rowH, theme)
         }
-        ctx.textAlign = 'left'
       })
-    } else {
+      ctx.restore()
+    }
+
+    // 3. Left-fixed cells (with background)
+    if (fixedLeftCols.value.length > 0) {
+      visibleItems.forEach((item, i) => {
+        const index = startIndex + i
+        const rowTop = sums[index] - offsetY
+        const rowH = sums[index + 1] - sums[index]
+        const isHovered = index === hoveredIndex.value
+        const isSelected = selEnabled && selSet.has(getRowKey(item, index))
+
+        if (isSelected) {
+          ctx.fillStyle = theme.rowActiveBg
+        } else if (isHovered) {
+          ctx.fillStyle = theme.rowHoverBg
+        } else if (props.striped && index % 2 === 1) {
+          ctx.fillStyle = theme.rowAltBg
+        } else {
+          ctx.fillStyle = theme.rowBg
+        }
+        ctx.fillRect(0, rowTop, flw, rowH)
+
+        ctx.fillStyle = theme.cellText
+        ctx.font = bodyFont.value
+        ctx.textBaseline = 'top'
+
+        for (const { col, index: colIdx } of fixedLeftCols.value) {
+          const w = widths[colIdx]
+          const x = lefts[colIdx]
+          drawCellWithTree(ctx, col, colIdx, item, index, x, w, rowTop, rowH, theme)
+        }
+      })
+    }
+
+    // 4. Right-fixed cells (with background)
+    if (fixedRightCols.value.length > 0) {
+      visibleItems.forEach((item, i) => {
+        const index = startIndex + i
+        const rowTop = sums[index] - offsetY
+        const rowH = sums[index + 1] - sums[index]
+        const isHovered = index === hoveredIndex.value
+        const isSelected = selEnabled && selSet.has(getRowKey(item, index))
+
+        if (isSelected) {
+          ctx.fillStyle = theme.rowActiveBg
+        } else if (isHovered) {
+          ctx.fillStyle = theme.rowHoverBg
+        } else if (props.striped && index % 2 === 1) {
+          ctx.fillStyle = theme.rowAltBg
+        } else {
+          ctx.fillStyle = theme.rowBg
+        }
+        const rxStart = cw - frw
+        ctx.fillRect(rxStart, rowTop, frw, rowH)
+
+        ctx.fillStyle = theme.cellText
+        ctx.font = bodyFont.value
+        ctx.textBaseline = 'top'
+
+        let rx = cw - frw
+        for (const { col, index: colIdx } of fixedRightCols.value) {
+          const w = widths[colIdx]
+          drawCellWithTree(ctx, col, colIdx, item, index, rx, w, rowTop, rowH, theme)
+          rx += w
+        }
+      })
+    }
+  } else {
+    // No columns: simple text rendering
+    visibleItems.forEach((item, i) => {
+      const index = startIndex + i
+      const rowTop = sums[index] - offsetY
+      const rowH = sums[index + 1] - sums[index]
+
+      ctx.fillStyle = theme.cellText
+      ctx.font = bodyFont.value
+      ctx.textBaseline = 'top'
+
       const text = getItemText(item)
       const lines = wrapText(
         ctx,
         text,
         cw - CELL_PADDING_X * 2
       )
-      const textBlockH =
-        lines.length * DEFAULT_LINE_HEIGHT
+      const textBlockH = lines.length * DEFAULT_LINE_HEIGHT
       const textTop = rowTop + (rowH - textBlockH) / 2
       lines.forEach((line, li) => {
         ctx.fillText(
@@ -732,7 +1834,14 @@ function render() {
           textTop + li * DEFAULT_LINE_HEIGHT
         )
       })
-    }
+    })
+  }
+
+  // 5. Row separator lines
+  visibleItems.forEach((_, i) => {
+    const index = startIndex + i
+    const rowTop = sums[index] - offsetY
+    const rowH = sums[index + 1] - sums[index]
 
     ctx.strokeStyle = theme.border
     ctx.lineWidth = 1
@@ -740,19 +1849,121 @@ function render() {
     ctx.moveTo(0, rowTop + rowH - 0.5)
     ctx.lineTo(cw, rowTop + rowH - 0.5)
     ctx.stroke()
-
-    if (hasCols && props.bordered) {
-      cols.forEach((_col, j) => {
-        if (j === 0) return
-        const x = lefts[j] ?? 0
-        ctx.beginPath()
-        ctx.moveTo(x + 0.5, rowTop)
-        ctx.lineTo(x + 0.5, rowTop + rowH)
-        ctx.stroke()
-      })
-    }
   })
+
+  // 6. Bordered vertical lines
+  if (hasCols && props.bordered) {
+    ctx.strokeStyle = theme.border
+    ctx.lineWidth = 1
+
+    // Left-fixed borders
+    for (const { index: colIdx } of fixedLeftCols.value) {
+      if (colIdx === 0) continue
+      const x = lefts[colIdx]
+      ctx.beginPath()
+      ctx.moveTo(x + 0.5, 0)
+      ctx.lineTo(x + 0.5, ch)
+      ctx.stroke()
+    }
+
+    // Scrollable borders (clipped)
+    if (scrollableArea > 0) {
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(flw, 0, scrollableArea, ch)
+      ctx.clip()
+      for (const { index: colIdx } of scrollableCols.value) {
+        const x = lefts[colIdx] - sl
+        if (x <= flw) continue
+        ctx.beginPath()
+        ctx.moveTo(x + 0.5, 0)
+        ctx.lineTo(x + 0.5, ch)
+        ctx.stroke()
+      }
+      ctx.restore()
+    }
+
+    // Right-fixed borders
+    if (fixedRightCols.value.length > 0) {
+      let rx = cw - frw
+      for (let i = 0; i < fixedRightCols.value.length; i++) {
+        if (i > 0) {
+          ctx.beginPath()
+          ctx.moveTo(rx + 0.5, 0)
+          ctx.lineTo(rx + 0.5, ch)
+          ctx.stroke()
+        }
+        rx += widths[fixedRightCols.value[i].index]
+      }
+    }
+
+    // Fixed boundary lines
+    if (flw > 0) {
+      ctx.beginPath()
+      ctx.moveTo(flw + 0.5, 0)
+      ctx.lineTo(flw + 0.5, ch)
+      ctx.stroke()
+    }
+    if (frw > 0) {
+      ctx.beginPath()
+      ctx.moveTo(cw - frw + 0.5, 0)
+      ctx.lineTo(cw - frw + 0.5, ch)
+      ctx.stroke()
+    }
+  }
+
+  // 7. Shadows
+  if (hasFixedCols.value) {
+    drawFixedShadows(ctx, ch)
+  }
 }
+
+// ========== Public API ==========
+
+function scrollToRow(index: number, align: 'start' | 'center' | 'end' = 'start') {
+  const el = containerRef.value
+  if (!el) return
+  const total = flatItems.value.length
+  if (index < 0 || index >= total) return
+
+  const sums = prefixSums.value
+  const rowTop = sums[index] ?? 0
+  const rowH = (sums[index + 1] ?? rowTop) - rowTop
+  const hh = effectiveHeaderHeight.value
+  const viewH = bodyHeight.value
+
+  let targetScroll: number
+  if (align === 'center') {
+    targetScroll = rowTop - (viewH - rowH) / 2
+  } else if (align === 'end') {
+    targetScroll = rowTop - viewH + rowH
+  } else {
+    targetScroll = rowTop
+  }
+
+  el.scrollTop = Math.max(0, targetScroll + hh)
+}
+
+function getSelectedKeys(): Array<string | number> {
+  return Array.from(selectedKeySet.value)
+}
+
+function clearSelection() {
+  internalSelectedKeys.value = new Set()
+  emit('selection-change', [])
+}
+
+defineExpose({
+  scrollToRow,
+  selectAll,
+  clearSelection,
+  getSelectedKeys,
+  isAllSelected,
+  isIndeterminate,
+  toggleExpand,
+})
+
+// ========== Lifecycle ==========
 
 let resizeObserver: ResizeObserver | null = null
 
@@ -792,16 +2003,21 @@ onUnmounted(() => {
   resizeObserver?.disconnect()
   if (rafId) cancelAnimationFrame(rafId)
   if (mouseMoveRafId) cancelAnimationFrame(mouseMoveRafId)
+  document.removeEventListener('mousemove', onResizeMove)
+  document.removeEventListener('mouseup', onResizeEnd)
 })
 
 watch(
   [
     range,
     containerWidth,
-    canvasWidth,
     columnWidths,
     hoveredIndex,
+    scrollLeft,
+    selectedKeySet,
     t,
+    internalColumnWidths,
+    expandedKeySet,
   ],
   () => {
     scheduleRender()
@@ -871,7 +2087,6 @@ watch(
 
 .cvt__spacer {
   position: relative;
-  width: fit-content;
   min-width: 100%;
 }
 
@@ -881,6 +2096,18 @@ watch(
   left: 0;
   display: block;
   z-index: 2;
+}
+
+.cvt__header-overlay {
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.cvt__header-cell {
+  pointer-events: auto;
 }
 
 .cvt__body {
@@ -896,10 +2123,13 @@ watch(
   position: absolute;
   top: 0;
   left: 0;
-  width: 100%;
   overflow: hidden;
   pointer-events: none;
   z-index: 1;
+}
+
+.cvt__overlay--scrollable {
+  overflow: hidden;
 }
 
 .cvt__cell {

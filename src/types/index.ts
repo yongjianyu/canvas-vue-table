@@ -6,25 +6,28 @@ export interface Column {
   width: number
   /** 'text' 由 Canvas 绘制（默认），'html' 由 HTML 覆盖层渲染 */
   type?: 'text' | 'html'
-  /**
-   * type 为 'html' 时的渲染函数
-   * 支持三种返回值：
-   * - VNode: h('button', { onClick }, '点击')
-   * - string: '<span class="tag">标签</span>'
-   * - VNode（使用组件）: h(MyComponent, { item })
-   */
   render?: (params: CellRenderParams) => VNode | string
-  /**
-   * type 为 'html' 时直接传 Vue 组件（免写 render 和 h）
-   * 组件会收到 CellRenderParams 作为 props
-   */
   component?: Component
-  /** 传给 component 的额外 props */
   componentProps?:
     | Record<string, unknown>
     | ((params: CellRenderParams) => Record<string, unknown>)
-  /** 文本对齐方式 */
   align?: 'left' | 'center' | 'right'
+  fixed?: 'left' | 'right'
+  sortable?: boolean
+  /** 是否可拖拽调宽 */
+  resizable?: boolean
+  /** 最小列宽 */
+  minWidth?: number
+  /** 最大列宽 */
+  maxWidth?: number
+  /** 表头渲染模式，'html' 时使用 headerRender 或 headerComponent */
+  headerType?: 'text' | 'html'
+  /** 自定义表头渲染函数 */
+  headerRender?: (params: HeaderRenderParams) => VNode | string
+  /** 自定义表头组件 */
+  headerComponent?: Component
+  /** 传给 headerComponent 的额外 props */
+  headerComponentProps?: Record<string, unknown>
 }
 
 export interface Theme {
@@ -51,6 +54,29 @@ export interface CellRenderParams {
   value: unknown
 }
 
+export interface HeaderRenderParams {
+  column: Column
+  columnIndex: number
+}
+
+export type SortOrder = 'asc' | 'desc' | null
+
+export interface SortState {
+  field: string
+  order: SortOrder
+}
+
+export type SelectionMode = 'none' | 'single' | 'multiple'
+
+export interface ContextMenuParams {
+  item: unknown
+  index: number
+  column: Column | null
+  columnIndex: number
+  x: number
+  y: number
+}
+
 export interface VirtualListProps {
   columns: Column[]
   items: unknown[]
@@ -64,6 +90,13 @@ export interface VirtualListProps {
   bordered?: boolean
   loading?: boolean
   loadingText?: string
+  rowKey?: string
+  selectionMode?: SelectionMode
+  selectedKeys?: Array<string | number>
+  childrenField?: string
+  defaultExpandAll?: boolean
+  expandedKeys?: Array<string | number>
+  indent?: number
 }
 
 export interface VirtualListEmits {
@@ -71,4 +104,9 @@ export interface VirtualListEmits {
   (e: 'row-click', item: unknown, index: number): void
   (e: 'cell-click', item: unknown, index: number, column: Column): void
   (e: 'load-more'): void
+  (e: 'sort-change', sortState: SortState): void
+  (e: 'selection-change', selectedKeys: Array<string | number>): void
+  (e: 'column-resize', columnIndex: number, width: number): void
+  (e: 'context-menu', params: ContextMenuParams): void
+  (e: 'expand-change', expandedKeys: Array<string | number>): void
 }
