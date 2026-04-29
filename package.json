@@ -1,6 +1,6 @@
 {
   "name": "canvas-vue-table",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "基于 Canvas 的高性能 Vue 3 虚拟列表组件库",
   "type": "module",
   "main": "./dist/canvas-vue-table.umd.cjs",
