@@ -2,6 +2,8 @@
 
 基于 Canvas 的高性能 Vue 3 表格组件，专为海量数据渲染场景设计。
 
+📖 [在线文档](https://yongjianyu.github.io/canvas-vue-table)
+
 通过 Canvas 绘制表格主体，结合虚拟滚动技术，轻松应对 **十万级** 数据量，同时支持 HTML 混合渲染满足交互需求。
 
 ## 特性
