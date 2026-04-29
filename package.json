@@ -43,6 +43,7 @@
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
     "build": "vite build",
+    "publish:public": "pnpm run build && pnpm version patch && npm publish --access public",
     "preview": "vite preview"
   }
 }
