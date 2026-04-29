@@ -28,6 +28,8 @@ export default defineConfig({
               { text: '自定义表头渲染', link: '/guide/custom-header' },
               { text: '树形数据', link: '/guide/tree-data' },
               { text: '右键菜单', link: '/guide/context-menu' },
+              { text: '单元格编辑', link: '/guide/cell-edit' },
+              { text: '导出 CSV', link: '/guide/export-csv' },
             ],
           },
           {
@@ -62,6 +64,8 @@ export default defineConfig({
               { text: 'Custom Header', link: '/en/guide/custom-header' },
               { text: 'Tree Data', link: '/en/guide/tree-data' },
               { text: 'Context Menu', link: '/en/guide/context-menu' },
+              { text: 'Cell Editing', link: '/en/guide/cell-edit' },
+              { text: 'Export CSV', link: '/en/guide/export-csv' },
             ],
           },
           {

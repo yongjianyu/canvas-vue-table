@@ -11,6 +11,7 @@
     @mousemove="onMouseMove"
     @mouseleave="onMouseLeave"
     @click="onClick"
+    @dblclick="onDblClick"
     @contextmenu="onContextMenu"
   >
     <div
@@ -126,6 +127,16 @@
         </div>
       </div>
     </div>
+    <input
+      v-if="editState"
+      ref="editInputRef"
+      v-model="editState.value"
+      class="cvt__edit-input"
+      :style="editInputStyle"
+      @keydown.enter="commitEdit"
+      @keydown.esc="cancelEdit"
+      @blur="commitEdit"
+    />
     <div
       v-if="loading"
       class="cvt__loading"
@@ -183,9 +194,11 @@ import {
 } from 'vue'
 import type { VNode } from 'vue'
 import { useVirtualList } from '../composables/useVirtualList'
+import { exportCsv as exportCsvUtil } from '../utils/exportCsv'
 import type {
   Column,
   CellRenderParams,
+  CellEditParams,
   HeaderRenderParams,
   Theme,
   SortOrder,
@@ -278,6 +291,7 @@ const emit = defineEmits<{
   'column-resize': [columnIndex: number, width: number]
   'expand-change': [expandedKeys: Array<string | number>]
   'context-menu': [params: ContextMenuParams]
+  'cell-edit': [params: CellEditParams]
 }>()
 
 const t = computed<Required<Theme>>(() => ({
@@ -954,6 +968,7 @@ function scheduleRender() {
 let loadMoreEmitted = false
 
 function onScroll() {
+  if (editState.value) cancelEdit()
   const el = containerRef.value
   if (!el) return
   const top = Math.max(
@@ -1123,6 +1138,126 @@ function onContextMenu(e: MouseEvent) {
     x: e.clientX,
     y: e.clientY,
   })
+}
+
+// ========== Cell Editing ==========
+
+const editInputRef = ref<HTMLInputElement | null>(null)
+
+interface EditState {
+  rowIndex: number
+  colIndex: number
+  item: unknown
+  column: Column
+  oldValue: unknown
+  value: string
+  rect: { top: number; left: number; width: number; height: number }
+}
+
+const editState = ref<EditState | null>(null)
+
+const editInputStyle = computed(() => {
+  if (!editState.value) return {}
+  const { rect } = editState.value
+  return {
+    position: 'fixed' as const,
+    top: `${rect.top}px`,
+    left: `${rect.left}px`,
+    width: `${rect.width}px`,
+    height: `${rect.height}px`,
+    zIndex: 10,
+  }
+})
+
+function getCellRect(rowIndex: number, colIndex: number) {
+  const el = containerRef.value
+  const canvas = canvasRef.value
+  if (!el || !canvas) return null
+
+  const sums = prefixSums.value
+  const widths = columnWidths.value
+  const lefts = columnLefts.value
+  const col = props.columns[colIndex]
+  const sl = scrollLeft.value
+  const flw = fixedLeftWidth.value
+  const frw = fixedRightWidth.value
+  const cw = containerWidth.value
+
+  const canvasRect = canvas.getBoundingClientRect()
+  const { offsetY } = range.value
+
+  const rowTop = sums[rowIndex] - offsetY
+  const rowH = sums[rowIndex + 1] - sums[rowIndex]
+
+  let cellLeft: number
+  if (col.fixed === 'left') {
+    cellLeft = lefts[colIndex]
+  } else if (col.fixed === 'right') {
+    let rx = cw - frw
+    for (const { index } of fixedRightCols.value) {
+      if (index === colIndex) { cellLeft = rx; break }
+      rx += widths[index]
+    }
+    cellLeft = cellLeft! ?? rx
+  } else {
+    cellLeft = lefts[colIndex] - sl
+  }
+
+  return {
+    top: canvasRect.top + rowTop,
+    left: canvasRect.left + cellLeft,
+    width: widths[colIndex],
+    height: rowH,
+  }
+}
+
+function onDblClick(e: MouseEvent) {
+  const hit = hitTest(e)
+  if (!hit || hit.colIndex < 0) return
+  const col = props.columns[hit.colIndex]
+  if (!col.editable) return
+
+  const rect = getCellRect(hit.rowIndex, hit.colIndex)
+  if (!rect) return
+
+  const item = flatItems.value[hit.rowIndex]
+  const oldValue = getCellValue(item, col.field)
+
+  editState.value = {
+    rowIndex: hit.rowIndex,
+    colIndex: hit.colIndex,
+    item,
+    column: col,
+    oldValue,
+    value: String(oldValue ?? ''),
+    rect,
+  }
+
+  nextTick(() => {
+    editInputRef.value?.focus()
+    editInputRef.value?.select()
+  })
+}
+
+function commitEdit() {
+  if (!editState.value) return
+  const { item, column, oldValue, value, rowIndex } = editState.value
+
+  if (value !== String(oldValue ?? '')) {
+    emit('cell-edit', {
+      item,
+      index: rowIndex,
+      column,
+      field: column.field,
+      oldValue,
+      newValue: value,
+    })
+  }
+  editState.value = null
+}
+
+function cancelEdit() {
+  editState.value = null
 }
 
 // ========== Sorting Events ==========
@@ -1953,6 +2088,16 @@ function clearSelection() {
   emit('selection-change', [])
 }
 
+function exportToCsv(
+  options?: { filename?: string; separator?: string; withBOM?: boolean }
+) {
+  exportCsvUtil({
+    columns: props.columns,
+    items: flatItems.value,
+    ...options,
+  })
+}
+
 defineExpose({
   scrollToRow,
   selectAll,
@@ -1961,6 +2106,8 @@ defineExpose({
   isAllSelected,
   isIndeterminate,
   toggleExpand,
+  cancelEdit,
+  exportToCsv,
 })
 
 // ========== Lifecycle ==========
@@ -2177,6 +2324,20 @@ watch(
 
 .cvt__loading-text {
   font-size: 14px;
+}
+
+.cvt__edit-input {
+  box-sizing: border-box;
+  padding: 0 12px;
+  margin: 0;
+  border: 2px solid #409eff;
+  border-radius: 0;
+  outline: none;
+  font-family: inherit;
+  font-size: 14px;
+  color: #606266;
+  background: #fff;
+  box-shadow: 0 0 6px rgba(64, 158, 255, 0.25);
 }
 
 @keyframes cvt-spin {

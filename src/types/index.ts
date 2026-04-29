@@ -20,6 +20,8 @@ export interface Column {
   minWidth?: number
   /** 最大列宽 */
   maxWidth?: number
+  /** 是否可编辑（双击进入编辑） */
+  editable?: boolean
   /** 表头渲染模式，'html' 时使用 headerRender 或 headerComponent */
   headerType?: 'text' | 'html'
   /** 自定义表头渲染函数 */
@@ -77,6 +79,15 @@ export interface ContextMenuParams {
   y: number
 }
 
+export interface CellEditParams {
+  item: unknown
+  index: number
+  column: Column
+  field: string
+  oldValue: unknown
+  newValue: string
+}
+
 export interface VirtualListProps {
   columns: Column[]
   items: unknown[]
@@ -109,4 +120,5 @@ export interface VirtualListEmits {
   (e: 'column-resize', columnIndex: number, width: number): void
   (e: 'context-menu', params: ContextMenuParams): void
   (e: 'expand-change', expandedKeys: Array<string | number>): void
+  (e: 'cell-edit', params: CellEditParams): void
 }
