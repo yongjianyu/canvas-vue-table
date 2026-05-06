@@ -5,6 +5,11 @@ export default defineConfig({
   base: '/canvas-vue-table/',
   title: 'Canvas Vue Table',
   description: '基于 Canvas 的高性能 Vue 3 虚拟列表组件库',
+  themeConfig: {
+    socialLinks: [
+      { icon: 'github', link: 'https://github.com/yongjianyu/canvas-vue-table' },
+    ],
+  },
   locales: {
     root: {
       label: '中文',
